@@ -38,12 +38,16 @@ AppCanStatus App_Can_Init(void)
         return APP_CAN_STATUS_ERROR;
     }
 
-    /* 死总线阻塞根治（2026-09-05）：禁用自动重传（NART=1）。
-     * CubeMX 的 AutoRetransmission=ENABLE 使死总线上发送帧永不完成（RQCP 不来），
-     * 每次发送阻塞满 5ms 硬限；心跳+状态同迭代对齐时叠成 10ms > ADS 环形 8.2ms → 跳帧。
-     * NART=1 后失败帧 ~250µs 即完成（RQCP 置位、TXOK=0），阻塞归零；
-     * 固定帧协议通过事件队列重试实现瞬时发送失败后的恢复。
-     * NART 位仅在初始化模式下可写：INRQ→等 INAK→写位→清 INRQ（带超时防挂死）。 */
+    /* 自动重传：开启（2026-09-10 决策）。
+     * 历史：2026-09-05 曾改为 NART=1（禁自动重传），因为死总线上帧永不完成、RQCP 不来，
+     * 每次发送阻塞满 5ms 硬限，心跳+状态同迭代对齐时叠成 10ms > ADS 环形 8.2ms → 跳帧。
+     * 现在改为开启自动重传，理由是仲裁丢失/瞬时无 ACK 由硬件自动重发，不丢帧；
+     * 代价必须靠下面两点兜住（已实现，勿删）：
+     *   1) App_Can_Send 的超时/Bus-Off 路径会 HAL_CAN_AbortTxRequest() 释放邮箱，
+     *      否则无 ACK 的帧会一直重发、把 3 个邮箱占满 → 本板 CAN 发送永久死；
+     *   2) SCE 中断 + App_Can_RecoverBusOff() 负责 Bus-Off 恢复。
+     * 若死总线上 5ms 阻塞再次饿死 ADC 帧消费，把调用方 timeout 降到 1ms 即可。
+     * 该位运行时显式清零：不依赖 CubeMX 生成的 main.c（重新生成会覆盖那里）。 */
     {
         uint32_t t0 = HAL_GetTick();
         hcan1.Instance->MCR |= CAN_MCR_INRQ;
@@ -51,7 +55,7 @@ AppCanStatus App_Can_Init(void)
                ((HAL_GetTick() - t0) < 100u))
         {
         }
-        SET_BIT(hcan1.Instance->MCR, CAN_MCR_NART);
+        CLEAR_BIT(hcan1.Instance->MCR, CAN_MCR_NART);   /* NART=0 → 自动重传开启 */
         hcan1.Instance->MCR &= ~CAN_MCR_INRQ;
         t0 = HAL_GetTick();
         while (((hcan1.Instance->MSR & CAN_MSR_INAK) != 0u) &&
@@ -158,11 +162,15 @@ AppCanStatus App_Can_Send(AppCanPort port, const AppCanFrame *frame, uint32_t ti
     {
         if ((hcan1.Instance->ESR & CAN_ESR_BOFF) != 0u)
         {
+            /* 放弃前必须 abort 邮箱：否则该帧留在邮箱里，三个邮箱占满后
+             * HAL_CAN_AddTxMessage 恒失败 → 本板 CAN 发送永久死掉 */
+            (void)HAL_CAN_AbortTxRequest(&hcan1, mailbox_mask);
             s_diag.tx_fail_count++;
             return APP_CAN_STATUS_ERROR;
         }
         if ((HAL_GetTick() - t0) >= timeout_ms)
         {
+            (void)HAL_CAN_AbortTxRequest(&hcan1, mailbox_mask);
             s_diag.tx_fail_count++;
             return APP_CAN_STATUS_TIMEOUT;
         }

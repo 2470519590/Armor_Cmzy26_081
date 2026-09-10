@@ -16,6 +16,25 @@
       "serverpath": "C:/Program Files/JLink_V960/JLinkGDBServerCL.exe",
       "armToolchainPath": "E:/STM32CubeCLT_1.21.0/GNU-tools-for-STM32/bin",
       "gdbPath": "E:/STM32CubeCLT_1.21.0/GNU-tools-for-STM32/bin/arm-none-eabi-gdb.exe"
+    },
+    {
+      "name": "C/C++ Runner: Debug Session",
+      "type": "cppdbg",
+      "request": "launch",
+      "args": [],
+      "stopAtEntry": false,
+      "externalConsole": true,
+      "cwd": "e:/STM32_PROJ/l431_power_management/new_armor/Armor_Cmzy26_081/Core/Src",
+      "program": "e:/STM32_PROJ/l431_power_management/new_armor/Armor_Cmzy26_081/Core/Src/build/Debug/outDebug",
+      "MIMode": "gdb",
+      "miDebuggerPath": "gdb",
+      "setupCommands": [
+        {
+          "description": "Enable pretty-printing for gdb",
+          "text": "-enable-pretty-printing",
+          "ignoreFailures": true
+        }
+      ]
     }
   ]
 }

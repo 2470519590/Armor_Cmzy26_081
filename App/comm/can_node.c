@@ -5,13 +5,19 @@
 
 #define CAN_NODE_RX_QUEUE_DEPTH 4u
 #define CAN_NODE_SEND_TIMEOUT_MS 2u
+
+/* 枚举时序（多板同 ID 0x121 announce 防碰撞调优）：
+ * 四块板收同一条 0x120 后按 5+hash%50 同步起跑、每 2ms 一帧连续发 4 个分片；
+ * 同 ID 帧一旦重叠，CAN 仲裁无法区分发送方，数据场位错 → 双方整帧作废且发送方
+ * 无感知。故：(1) 加宽初始错开窗；(2) 重试延迟按 attempt 伪随机拉大，让后续尝试
+ * 与其它板错开；(3) 拉长单轮 session 生存期，避免 1000ms 掉线错过本轮收集。 */
 #define CAN_NODE_INITIAL_DELAY_BASE_MS 5u
-#define CAN_NODE_INITIAL_DELAY_SPAN_MS 50u
+#define CAN_NODE_INITIAL_DELAY_SPAN_MS 100u   /* 50→100 */
 #define CAN_NODE_RETRY_DELAY_BASE_MS 20u
-#define CAN_NODE_RETRY_DELAY_SPAN_MS 180u
+#define CAN_NODE_RETRY_DELAY_SPAN_MS 700u     /* 180→700 */
 #define CAN_NODE_ANNOUNCE_INTERVAL_MS 2u
 #define CAN_NODE_ASSIGN_WAIT_MS 180u
-#define CAN_NODE_ENUM_TIMEOUT_MS 1000u
+#define CAN_NODE_ENUM_TIMEOUT_MS 4000u        /* 1000→4000 */
 #define CAN_NODE_ANNOUNCE_FRAGMENT_COUNT 4u
 #define CAN_NODE_ACK_READY_MARKER 0xA5u
 
