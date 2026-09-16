@@ -5,9 +5,11 @@
  *
  * 实现要点：
  *  - CLKIN：TIM16 CH1N PWM 8.0MHz（HR 模式跑满），HAL_TIMEx_PWMN_Start 启动；
- *  - 初始化序列 6.3：PC15 复位脉冲 → 自愈盲发序列（UNLOCK/NULL/RESET/NULL）
- *    → 等 DRDY 上升沿 → UNLOCK → 探针回读校验（ID/MODE/CLOCK）→ 开流采集；
- *    （REVID=0x05 适配：只读回验证、不写任何寄存器）
+ *  - 初始化序列 6.3：PC15 复位脉冲 → 自愈盲发序列（UNLOCK/NULL/RESET/NULL，
+ *    救 DRDY 卡低的坏芯片）→ 等 DRDY 上升沿 → 就绪后补发 RESET（双保险，
+ *    保证落地）→ 等 DRDY 上升沿 → UNLOCK → 探针回读校验（ID/MODE/CLOCK）
+ *    → 寄存器表写入（ADS_REG_INIT_ENABLE 开关，CLOCK 优先、MODE 默认不写）
+ *    → 开流采集
  *  - 帧读取方案 A（6.4）：DRDY（ADC_NDRDY）下降沿 EXTI → 拉低 CS、启动 SPI TX+RX DMA
  *    （TX=静态 18B NULL）→ DMA 完成拉高 CS、槽标记满 → 主循环按读指针消费；
  *    K=32 帧环形缓冲（写指针仅 ISR 改、读指针仅主循环改、槽状态标志）；
@@ -47,12 +49,13 @@ typedef struct
     uint16_t val;
 } ads_reg_cfg_t;
 
-/* REVID=0x05 适配：本芯片写寄存器会破坏配置，初始化改为只读回验证不写入。
- * 此表保留为文档/参考（旧 SBAS890D 布局），待 TI 新版数据手册确认后再恢复使用。 */
-static const ads_reg_cfg_t s_reg_init[] __attribute__((unused)) =
+/* 写入顺序（2026-09-09 定稿）：CLOCK 排第一——修复新批次默认 OSR 异常的关键
+ * 寄存器，先落先验；其余为复位默认值的无害空写（布局一致时）；MODE 条目排在
+ * 末尾且由 ADS_REG_INIT_WRITE_MODE 子开关控制（REVID=0x05 实测写 MODE 会把
+ * 字长清成 16bit 破坏帧流，默认不写——若实验打开，其失步也不会污染前面写入）。 */
+static const ads_reg_cfg_t s_reg_init[] =
 {
-    { 0x02u, 0x0510u },   /* MODE：24bit 字长、CRC 关、TIMEOUT 开、RESET 标志置位（POR 态） */
-    { 0x03u, 0x0F0Eu },   /* CLOCK：4 通道使能 + OSR=1024 + PWR=HR（与默认一致，显式写入） */
+    { 0x03u, 0x0F0Eu },   /* CLOCK：4 通道使能 + OSR=1024 + PWR=HR（旧批默认即此值） */
     { 0x04u, 0x0000u },   /* GAIN1：4×PGA=1（标定后提升，6.6） */
     { 0x06u, 0x0600u },   /* CFG：默认 */
     { 0x07u, 0x0000u },   /* THRSHLD_MSB */
@@ -70,6 +73,8 @@ static const ads_reg_cfg_t s_reg_init[] __attribute__((unused)) =
     { 0x16u, 0x8000u }, { 0x17u, 0x0000u },   /* CH2_GCAL */
     { 0x1Bu, 0x8000u }, { 0x1Cu, 0x0000u },   /* CH3_GCAL */
     { 0x3Fu, 0x0000u },   /* RESERVED：手册要求恒写 0 */
+    { 0x02u, 0x0510u },   /* MODE：24bit 字长、CRC 关、TIMEOUT 开、RESET 标志置位（仅子开关打开时写） */
+    { 0x02u, 0x0410u },   /* MODE：清 RESET 标志（第二笔，仅子开关打开时写） */
 };
 
 /* ==================== 环形帧缓冲（方案 A，6.4） ==================== */
@@ -407,6 +412,43 @@ void ADS131M04_Init(void)
         }
     }
 
+    /* 5.5) 就绪后补发 RESET（双保险，2026-09-09）：
+     * 上一步的盲发序列可能在芯片"未就绪窗口"内被整体忽略（PC15 引脚复位
+     * 又不可依赖），坏状态芯片（上次运行被写成 LP/VLP 低功耗、16bit 字长）
+     * 就会带着残留寄存器状态继续跑——此时接口已就绪，补发的 RESET 保证
+     * 落地，CLOCK.PWR 等全部恢复默认。对已复位成功的芯片重复 RESET 无害。 */
+    {
+        uint8_t tx[ADS_FRAME_BYTES] = {0};
+        uint8_t rx[ADS_FRAME_BYTES];
+
+        Ads_PutWord(tx, ADS_CMD_UNLOCK);
+        Ads_ExchangeFrame(tx, rx);
+        memset(tx, 0, sizeof(tx));
+        Ads_ExchangeFrame(tx, rx);
+
+        Ads_PutWord(tx, ADS_CMD_RESET);
+        Ads_ExchangeFrame(tx, rx);
+        memset(tx, 0, sizeof(tx));
+        Ads_ExchangeFrame(tx, rx);
+
+        /* RESET 后重新等 DRDY 上升沿（接口就绪标志） */
+        {
+            uint32_t t0 = HAL_GetTick();
+            while ((HAL_GetTick() - t0) < 100u)
+            {
+                if (HAL_GPIO_ReadPin(ADC_NDRDY_GPIO_Port, ADC_NDRDY_Pin) == GPIO_PIN_SET)
+                {
+                    break;
+                }
+            }
+            if ((HAL_GetTick() - t0) >= 100u)
+            {
+                App_Log_Printf("[ADS] DRDY wait (post-RESET) timeout\r\n");
+                return;
+            }
+        }
+    }
+
     /* 5) UNLOCK（复位后本就解锁，显式发送防异常状态） */
     {
         uint8_t tx[ADS_FRAME_BYTES] = {0};
@@ -453,12 +495,56 @@ void ADS131M04_Init(void)
         App_Log_Printf("[ADS] MODE default check fail: 0x%04X (expect 0x0510)\r\n", s_probe_mode);
         return;
     }
-    if (s_probe_clock != 0x0F0Eu)
+    /* CLOCK 默认值：REVID=0x05 硅片布局与 SBAS890D 不一致（MODE 的坑重现在
+     * CLOCK 上），实测两种复位默认——0x0F0E=旧批次（曾被旧固件写入过，见调试
+     * 文档）、0x0F02=新批次真实默认；两者行为等效（DRDY≈3906Hz 实测确认，
+     * 即 OSR 等效 1024/HR）。仅接受已知集合，其余值仍判失败（防读错位）；
+     * 实际数据率由自检 ST_DRDY（3125~4687Hz）行为验证兜底。 */
+    if (s_probe_clock != 0x0F0Eu && s_probe_clock != 0x0F02u)
     {
-        App_Log_Printf("[ADS] CLOCK default check fail: 0x%04X (expect 0x0F0E)\r\n", s_probe_clock);
+        App_Log_Printf("[ADS] CLOCK default check fail: 0x%04X (expect 0x0F0E/0x0F02)\r\n", s_probe_clock);
         return;
     }
     s_init_stage = 6u;
+
+    /* 6.5) 寄存器表写入（编译开关 ADS_REG_INIT_ENABLE，2026-09-09 恢复）：
+     * CLOCK 优先写（修复新批次默认 OSR 异常的关键）；MODE 由
+     * ADS_REG_INIT_WRITE_MODE 子开关控制（默认不写，见 s_reg_init 注释）。
+     * 此刻流未启动，写前无需暂停。写入失败只记日志不判初始化失败——
+     * 帧流未失步即继续，实际数据率由上电自检 ST_DRDY（3125~4687Hz）
+     * 行为关卡判定并经 CAN 上报。 */
+#if ADS_REG_INIT_ENABLE
+    {
+        uint32_t n;
+        for (n = 0u; n < (sizeof(s_reg_init) / sizeof(s_reg_init[0])); n++)
+        {
+            int rc;
+
+            if (s_reg_init[n].addr == 0x02u && (ADS_REG_INIT_WRITE_MODE == 0u))
+            {
+                continue;   /* MODE 默认跳过（REVID=0x05 实测写坏字长） */
+            }
+            rc = ADS131M04_RegWrite(s_reg_init[n].addr, s_reg_init[n].val);
+            if (rc == 0)
+            {
+                App_Log_Printf("[ADS] WREG 0x%02X=0x%04X OK\r\n",
+                               s_reg_init[n].addr, s_reg_init[n].val);
+            }
+            else
+            {
+                App_Log_Printf("[ADS] WREG 0x%02X=0x%04X rc=%d readback=0x%04X\r\n",
+                               s_reg_init[n].addr, s_reg_init[n].val, rc, s_fail_readback);
+            }
+        }
+        /* 写后再探针 CLOCK：观察新批次是否写粘（不判失败，供调试判读） */
+        {
+            uint16_t clock_after = 0u;
+            (void)ADS131M04_RegRead(0x03u, &clock_after);
+            s_probe_clock = clock_after;
+            App_Log_Printf("[ADS] CLOCK after WREG: 0x%04X\r\n", clock_after);
+        }
+    }
+#endif
 
     /* 7) 开启流采集（丢弃前 2 帧：器件响应延迟一帧，首帧为旧数据） */
     s_init_ok = 1u;

@@ -14,6 +14,15 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+/* ---- 初始化寄存器写入开关（2026-09-09） ---- */
+/* 主开关：1=按 SBAS890D 表写入除 MODE 外全部寄存器（CLOCK 优先写）——
+ * 修复新批次默认 OSR 异常等场景；0=退回只读回验证（旧策略，量产兜底）。 */
+#define ADS_REG_INIT_ENABLE       1u
+/* MODE 写入子开关（实验用，默认 0）：0x0510→0x0410 两笔。
+ * 警告：REVID=0x05 实测写 MODE 会把字长清成 16bit 破坏帧流——仅在新
+ * 数据手册确认布局后或牺牲芯片做实验时打开。 */
+#define ADS_REG_INIT_WRITE_MODE   0u
+
 /* 单样本类型（24bit 有符号，符号已按极性宏修正后的 32 位表示） */
 typedef int32_t ads_sample_t;
 

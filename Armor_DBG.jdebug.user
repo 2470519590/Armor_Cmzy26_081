@@ -1,10 +1,10 @@
 
 
 GraphedExpression="(ads131m04.c::s_diag).drdy_cnt", DisplayFormat=DISPLAY_FORMAT_DEC, Color=#e56a6f, Show=0
-GraphedExpression="(s_last_frame).ch[0]", Color=#35792b
-GraphedExpression="(s_last_frame).ch[1]", Color=#769dda
-GraphedExpression="(s_last_frame).ch[2]", Color=#b14f0d
-GraphedExpression="(s_last_frame).ch[3]", Color=#b3c38e
+GraphedExpression="(s_last_frame).ch[0]", Color=#35792b, Show=0
+GraphedExpression="(s_last_frame).ch[1]", Color=#769dda, Show=0
+GraphedExpression="(s_last_frame).ch[2]", Color=#b14f0d, Show=0
+GraphedExpression="(s_last_frame).ch[3]", Color=#b3c38e, Show=0
 GraphedExpression="s_hit_sum", Color=#ab7b05, Show=0
 GraphedExpression="(ads131m04.c::s_diag).drop_cnt", Color=#7fd3b7, Show=0
 GraphedExpression="s_loop_max_us", Color=#50328f, Show=0
@@ -19,12 +19,12 @@ OpenDocument="Ozone_Watched_Data_1_260904.csv", FilePath="//192.168.191.221/Shuc
 OpenToolbar="Debug", Floating=0, x=0, y=0
 OpenWindow="Source Files", DockArea=LEFT, x=0, y=0, w=818, h=1398, TabPos=0, TopOfStack=0, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0
 OpenWindow="Watched Data 1", DockArea=LEFT, x=0, y=0, w=818, h=1398, TabPos=1, TopOfStack=1, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0
-OpenWindow="Data Sampling", DockArea=RIGHT, x=0, y=1, w=1281, h=611, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0, VisibleTab=0, UniformSampleSpacing=0
-OpenWindow="Timeline", DockArea=RIGHT, x=0, y=0, w=1281, h=808, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=1, DataPaneShown=1, PowerPaneShown=0, CodePaneShown=0, PinCursor="Cursor Movable", TimePerDiv="2 s / Div", TimeStampFormat="Time", DataGraphDrawAsPoints=0, DataGraphLegendShown=1, DataGraphUniformSampleSpacing=0, DataGraphLegendPosition="0;0", DataGraphShowNamesAtCursor=1, PowerGraphDrawAsPoints=0, PowerGraphLegendShown=0, PowerGraphAvgFilterTime=Off, PowerGraphAvgFilterLen=Off, PowerGraphUniformSampleSpacing=0, PowerGraphLegendPosition="1008;0", CodeGraphLegendShown=0, CodeGraphLegendPosition="1029;0"
+OpenWindow="Data Sampling", DockArea=RIGHT, x=0, y=1, w=1281, h=614, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0, VisibleTab=0, UniformSampleSpacing=0
+OpenWindow="Timeline", DockArea=RIGHT, x=0, y=0, w=1281, h=805, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=1, DataPaneShown=1, PowerPaneShown=0, CodePaneShown=0, PinCursor="Cursor Movable", TimePerDiv="2 s / Div", TimeStampFormat="Time", DataGraphDrawAsPoints=0, DataGraphLegendShown=1, DataGraphUniformSampleSpacing=0, DataGraphLegendPosition="0;0", DataGraphShowNamesAtCursor=1, PowerGraphDrawAsPoints=0, PowerGraphLegendShown=0, PowerGraphAvgFilterTime=Off, PowerGraphAvgFilterLen=Off, PowerGraphUniformSampleSpacing=0, PowerGraphLegendPosition="510;0", CodeGraphLegendShown=0, CodeGraphLegendPosition="531;0"
 OpenWindow="Console", DockArea=BOTTOM, x=0, y=0, w=2736, h=215, FilterBarShown=0, TotalValueBarShown=0, ToolBarShown=0
 SmartViewPlugin="", Page="", Toolbar="Hidden", Window="SmartView 1"
 TableHeader="Source Files", SortCol="File", SortOrder="ASCENDING", VisibleCols=["File";"Status";"Size";"#Insts";"Path"], ColWidths=[233;100;100;100;1164]
-TableHeader="Data Sampling Table", SortCol="None", SortOrder="ASCENDING", VisibleCols=["Index";"Time";" (ads131m04.c::s_diag).drdy_cnt";" (s_last_frame).ch[0]";" (s_last_frame).ch[1]";" (s_last_frame).ch[2]";" (s_last_frame).ch[3]";" s_hit_sum";" (ads131m04.c::s_diag).drop_cnt";" s_loop_max_us";" s_bcloop_max_us"], ColWidths=[100;100;100;100;100;100;100;100;100;100;100]
+TableHeader="Data Sampling Table", SortCol="None", SortOrder="ASCENDING", VisibleCols=[" (s_last_frame).ch[0]";" (s_last_frame).ch[1]";"Index";" (s_last_frame).ch[2]";"Time";" (ads131m04.c::s_diag).drdy_cnt";" (s_last_frame).ch[3]";" s_hit_sum";" (ads131m04.c::s_diag).drop_cnt";" s_loop_max_us";" s_bcloop_max_us"], ColWidths=[100;100;100;100;100;100;100;100;100;100;100]
 TableHeader="Data Sampling Setup", SortCol="Min. Change", SortOrder="DESCENDING", VisibleCols=["Expression";"Type";"Value";"Min";"Max";"Average";"# Changes";"Min. Change";"Max. Change"], ColWidths=[254;256;100;100;100;110;130;150;150]
 TableHeader="Power Sampling", SortCol="None", SortOrder="ASCENDING", VisibleCols=["Index";"Time";"Ch 0"], ColWidths=[100;100;100]
 TableHeader="RegisterSelectionDialog", SortCol="None", SortOrder="ASCENDING", VisibleCols=[], ColWidths=[]
@@ -39,7 +39,7 @@ WatchedExpression="s_last_mv", RefreshRate=5, Window=Watched Data 1
 WatchedExpression="s_streaming", RefreshRate=2, Window=Watched Data 1
 WatchedExpression="s_dma_busy", RefreshRate=2, Window=Watched Data 1
 WatchedExpression="s_diag", RefreshRate=1, Window=Watched Data 1
-WatchedExpression="s_chip_id", RefreshRate=1, Window=Watched Data 1
+WatchedExpression="s_chip_id", RefreshRate=1, DisplayFormat=DISPLAY_FORMAT_HEX, Window=Watched Data 1
 WatchedExpression="s_init_ok", RefreshRate=1, Window=Watched Data 1
 WatchedExpression="s_init_stage", RefreshRate=1, Window=Watched Data 1
 WatchedExpression="s_reg_init", Window=Watched Data 1
@@ -64,5 +64,5 @@ WatchedExpression="hit_event_t", RefreshRate=1, Window=Watched Data 1
 WatchedExpression="s_hit_dif_peak", RefreshRate=1, Window=Watched Data 1
 WatchedExpression="s_loop_max_us", RefreshRate=5, Window=Watched Data 1
 WatchedExpression="s_bcloop_max_us", RefreshRate=1, Window=Watched Data 1
-WatchedExpression="s_live", RefreshRate=1, DisplayFormat=DISPLAY_FORMAT_HEX, Window=Watched Data 1
-WatchedExpression="s_sticky", RefreshRate=1, DisplayFormat=DISPLAY_FORMAT_HEX, Window=Watched Data 1
+WatchedExpression="s_live", RefreshRate=1, Window=Watched Data 1
+WatchedExpression="s_sticky", RefreshRate=1, Window=Watched Data 1
