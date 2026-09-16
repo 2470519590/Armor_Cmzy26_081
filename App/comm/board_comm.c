@@ -1,76 +1,71 @@
 /**
  ******************************************************************************
  * @file    board_comm.c
- * @brief   本板消息集实现（车内总线协议，设计文档 v1.5 第 9 章，Step 4 全实现）。
+ * @brief   装甲板固定帧 CAN 协议实现。
  *
- * - ISOTP 传输 + 调度器（ACK 重试）+ 分发器三实例接线；
- * - 上行：心跳 50ms（20Hz）、STATUS_REPORT（默认 1Hz，P24 可调）、MSG_HIT_EVENT；
- * - 下行：0x51 控制命令分派（LED/参数/ID/自检/零偏）+ ACK；
- * - 心跳超时跟踪（P14=200ms）→ 状态机 COMM_LOST 联动。
- * CAN ID（0x1A0/0x2A0）、src_id、新 TLV 码均为建议值（风险 R15，待协议方确认）。
+ * 接收中断只复制小帧；所有控制、应答与发送均在主循环执行，
+ * 防止 CAN 事务阻塞 DRDY/SPI 采样链路。
  ******************************************************************************
  */
 #include "comm/board_comm.h"
 
 #include "board.h"
 #include "comm/app_can.h"
-#include "comm/app_log.h"
-#include "comm/protocol/app_ack.h"
-#include "comm/protocol/app_frame.h"
-#include "comm/protocol/tlv.h"
-#include "comm/service/dispatcher.h"
-#include "comm/service/retry_ack_scheduler.h"
-#include "comm/transport/isotp.h"
+#include "comm/can_node.h"
 #include "app/led_status.h"
+#include "app/reset_cause.h"
 #include "app/state_machine.h"
-#include "app/faults.h"
-#include "app/self_test.h"
-#include "detect/calibration.h"
+#include "bsp/temp_mon.h"
 #include "detect/hit_detect.h"
 
-#include <stdio.h>
 #include <string.h>
 
-/* ==================== 实例 ==================== */
-static TransportIsotpContext  g_isotp;
-static ServiceRetryAckScheduler g_sched;
-static ServiceDispatcher      g_disp;
+#define BOARD_FAULT_REPEAT_MS    100u
+#define BOARD_INIT_RETRY_MS      500u
+#define BOARD_RX_QUEUE_DEPTH     4u
+#define BOARD_HIT_QUEUE_DEPTH    4u
+#define BOARD_CAN_SEND_TIMEOUT   2u
+#define BOARD_COMM_LOST_MS        300u
+#define BOARD_HIT_ACK_RETRY_MS    100u
 
-/* ==================== 运行状态（调试器可直接 watch） ==================== */
-static volatile uint32_t s_hb_last_ms;      /* 最近收到核心板心跳的时刻 */
-static volatile uint8_t  s_hb_lost;         /* 心跳丢失标志 */
-static volatile uint32_t s_sent_count;      /* 上行消息计数 */
-static volatile uint32_t s_rx_count;        /* 下行消息计数 */
-static uint32_t s_last_hb_tx_ms;            /* 上次心跳发送时刻 */
-static uint32_t s_last_status_tx_ms;        /* 上次状态上报时刻 */
-static hit_param_t s_param;                 /* 参数副本（P14/P24） */
+typedef struct { uint16_t id; uint8_t dlc; uint8_t data[8]; } board_rx_item_t;
+typedef struct { uint8_t data[8]; uint8_t sequence; } board_hit_item_t;
 
-static uint16_t s_module_uid;               /* MCU UID 低 2 字节 */
-static uint32_t s_hb_pause_until;           /* 连续发送失败后的心跳退避截止时刻 */
-static uint32_t s_send_fail_streak;         /* 连续发送失败计数 */
+static board_rx_item_t s_rx_queue[BOARD_RX_QUEUE_DEPTH];
+static volatile uint8_t s_rx_wr;
+static uint8_t s_rx_rd;
+static volatile uint32_t s_rx_drop;
 
-/* 状态上报沿检测（9.4：状态变化 + 周期上报） */
-static uint16_t s_last_faults_reported;     /* 上次上报的故障位图 */
-static sm_state_t s_last_state_reported;    /* 上次上报的状态 */
-static uint32_t s_last_edge_ms;             /* 上次沿上报时刻（≥100ms 节流） */
-static uint32_t s_last_st_ms;               /* 上次自检触发时刻（PVD 5s 自动重试用） */
+static board_hit_item_t s_hit_queue[BOARD_HIT_QUEUE_DEPTH];
+static uint8_t s_hit_wr;
+static uint8_t s_hit_rd;
+static uint8_t s_hit_count;
+static volatile uint32_t s_hit_drop;
 
-/* ---- BoardComm_Loop 阻塞诊断（DWT 周期计数，1 cycle = 12.5ns @80MHz） ---- */
-static volatile uint32_t s_bcloop_us;       /* 最近一次 BoardComm_Loop 耗时（µs） */
-static volatile uint32_t s_bcloop_max_us;   /* 1s 窗口最大耗时 */
-static uint32_t s_bcloop_max_cyc;
-static uint32_t s_bcloop_pub_ms;
+static uint32_t s_last_fault_tx_ms;
+static uint32_t s_last_fault_attempt_ms;
+static uint32_t s_last_reset_attempt_ms;
+static uint32_t s_last_init_attempt_ms;
+static uint32_t s_last_hit_attempt_ms;
+static volatile uint32_t s_last_l431_rx_ms;
+static uint8_t s_hit_sequence;
+static uint16_t s_fault_last_sent;
+static uint8_t s_init_pending;
+static uint8_t s_reset_pending;
 
-/* RX 桥接：AppCanRxCallback(port, frame) → ISOTP(ctx, port, frame) */
+/* 调试观察值。 */
+static volatile uint32_t s_sent_count;
+static volatile uint32_t s_rx_count;
+
 static void Bc_CanRxBridge(AppCanPort port, const AppCanFrame *frame);
 
-/* ==================== 内部：发送与回调 ==================== */
-
-/* 调度器 send_fn：payload 为已编码的应用帧字节流 */
-static bool Bc_SchedSend(void *user_arg, const uint8_t *payload, uint16_t length)
+static bool Bc_Send(uint16_t id, const uint8_t *data, uint8_t dlc)
 {
-    (void)user_arg;
-    if (Transport_Isotp_Send(&g_isotp, payload, length) == TRANSPORT_ISOTP_OK)
+    if (id == 0u || !CanNode_IsReady())
+    {
+        return false;
+    }
+    if (App_Can_SendStd(APP_CAN_PORT_1, id, data, dlc, BOARD_CAN_SEND_TIMEOUT) == APP_CAN_STATUS_OK)
     {
         s_sent_count++;
         return true;
@@ -78,491 +73,255 @@ static bool Bc_SchedSend(void *user_arg, const uint8_t *payload, uint16_t length
     return false;
 }
 
-/* 调度器 idle_fn：传输空闲时可发下一条（栈内部处理，此处恒 true） */
-static bool Bc_SchedIdle(void *user_arg)
+static void Bc_PutU16Le(uint8_t *dst, uint16_t value)
 {
-    (void)user_arg;
-    return true;
+    dst[0] = (uint8_t)(value & 0xFFu);
+    dst[1] = (uint8_t)(value >> 8);
 }
 
-/* ISOTP 发送完成 → 调度器 */
-static void Bc_OnTxComplete(void *user_arg, TransportIsotpStatus status)
+static bool Bc_SendStatusReply(void)
 {
-    (void)user_arg;
-    Service_RetryAckScheduler_OnTransmitComplete(&g_sched, status);
+    AppCanDiag diag;
+    uint8_t data[8] = {0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u};
+    data[0] = (uint8_t)StateMachine_Get();
+    data[1] = ResetCause_GetLatched();
+    Bc_PutU16Le(&data[2], HitDetect_GetFaultFlags());
+    Bc_PutU16Le(&data[4], TempMon_GetFaultFlags());
+    App_Can_GetDiag(APP_CAN_PORT_1, &diag);
+    data[6] = (uint8_t)((diag.error_warning != 0u ? 0x01u : 0u) |
+                        (diag.error_passive != 0u ? 0x02u : 0u) |
+                        (diag.bus_off != 0u ? 0x04u : 0u));
+    return Bc_Send(CanNode_BusinessId(CAN_NODE_OFFSET_STATUS_REPLY), data, sizeof(data));
 }
 
-/* ISOTP 收到完整消息 → 解码分发 + ACK 匹配 + 心跳跟踪 */
-static void Bc_OnMessage(void *user_arg, const uint8_t *payload, uint16_t length)
+static bool Bc_SendNodeIdReply(void)
 {
-    ProtocolAppFrame frame;
-
-    (void)user_arg;
-    if (!Protocol_AppFrame_Decode(&frame, payload, length))
-    {
-        return;
-    }
-    s_rx_count++;
-
-    /* 核心板心跳（0x01）：更新接收时刻，恢复 COMM_LOST */
-    if (frame.func_code == FUNC_HEARTBEAT && frame.src_id == BOARD_DST_ID)
-    {
-        s_hb_last_ms = HAL_GetTick();
-        if (s_hb_lost != 0u)
-        {
-            s_hb_lost = 0u;
-            StateMachine_OnCommLost(false);
-        }
-        return;
-    }
-
-    /* ACK 帧 → 调度器匹配 */
-    if (frame.func_code == FUNC_ACK)
-    {
-        Service_RetryAckScheduler_OnReceivedFrame(&g_sched, &frame);
-        return;
-    }
-
-    /* 其余 → 分发器 */
-    (void)Service_Dispatcher_DispatchFrame(&g_disp, APP_CAN_PORT_1, &frame);
+    uint8_t data[8] = {0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u};
+    data[0] = CanNode_GetId();
+    data[1] = (uint8_t)can_node_diag.token;
+    data[2] = (uint8_t)(can_node_diag.token >> 8);
+    data[3] = (uint8_t)(can_node_diag.token >> 16);
+    Bc_PutU16Le(&data[4], can_node_diag.uid_crc16);
+    return Bc_Send(CanNode_BusinessId(CAN_NODE_OFFSET_NODE_ID_REPLY), data, sizeof(data));
 }
 
-/* ISOTP 帧日志（可选调试） */
-static void Bc_OnFrame(void *user_arg, AppCanPort port, const char *direction, const AppCanFrame *frame)
+static bool Bc_AllZero(const uint8_t data[8])
 {
-    (void)user_arg; (void)port; (void)direction; (void)frame;
-    /* 调试期可打印：App_Log_Printf("[ISOTP] %s id=0x%03lX dlc=%u\r\n", ...) */
-}
-
-/* ==================== 下行命令处理 ==================== */
-
-static bool Bc_HandleCtrlCmd(void *user_arg, AppCanPort port, const ProtocolAppFrame *frame)
-{
-    ProtocolTlvReader reader;
-    ProtocolTlvView view;
-    uint8_t cmd_index = 0u;
-    bool have_cmd = false;
-    uint8_t r = 0u, g = 0u, b = 0u, brightness = 100u;
-    uint8_t effect = 0u;
-    bool have_effect = false, have_value = false, have_brightness = false;
-    uint8_t armor_id = 0u;
-    bool have_armor = false;
-    uint16_t param_id = 0u;
-    uint32_t param_val = 0u;
-    bool have_param_id = false, have_param_val = false;
-
-    (void)user_arg; (void)port;
-
-    Protocol_TlvReader_Init(&reader, frame->data, frame->data_len);
-    while (Protocol_TlvReader_Next(&reader, &view))
+    uint8_t i;
+    for (i = 0u; i < 8u; i++)
     {
-        switch (view.type)
-        {
-        case PROTOCOL_TLV_CMD_INDEX:              /* 0x29 */
-            Protocol_Tlv_ReadU8(&view, &cmd_index);
-            have_cmd = true;
-            break;
-        case TLV_EFFECT:                          /* 0x38 本板新增码 */
-            Protocol_Tlv_ReadU8(&view, &effect);
-            have_effect = true;
-            break;
-        case PROTOCOL_TLV_VALUE:                  /* 0x05：LED 自定义色 0xRRGGBB */
-        {
-            uint32_t v = 0u;
-            Protocol_Tlv_ReadU32(&view, &v);
-            r = (uint8_t)(v >> 16);
-            g = (uint8_t)(v >> 8);
-            b = (uint8_t)(v);
-            have_value = true;
-            break;
-        }
-        case TLV_BRIGHTNESS:                      /* 0x37 */
-            Protocol_Tlv_ReadU8(&view, &brightness);
-            have_brightness = true;
-            break;
-        case TLV_ARMOR_ID:                        /* 0x3B */
-            Protocol_Tlv_ReadU8(&view, &armor_id);
-            have_armor = true;
-            break;
-        case TLV_PARAM_ID:                        /* 0x39 */
-            Protocol_Tlv_ReadU16(&view, &param_id);
-            have_param_id = true;
-            break;
-        case TLV_PARAM_VALUE:                     /* 0x3A */
-            Protocol_Tlv_ReadU32(&view, &param_val);
-            have_param_val = true;
-            break;
-        default:
-            break;
-        }
-    }
-
-    if (!have_cmd)
-    {
-        return false;
-    }
-
-    switch (cmd_index)
-    {
-    case CMD_LED_CTRL:
-        if (have_effect)
-        {
-            if (effect < LED_EFF_COUNT)
-            {
-                LedStatus_SetEffect((led_effect_t)effect);
-            }
-        }
-        if (have_value)
-        {
-            (void)r; (void)g; (void)b;   /* 自定义颜色 TODO(Step 4+)：led_status 增加自定义色接口 */
-        }
-        if (have_brightness)
-        {
-            LedStatus_SetBrightness(brightness);
-        }
-        break;
-
-    case CMD_PARAM_SET:
-        if (have_param_id && have_param_val)
-        {
-            /* TODO(Step 4+)：按 param_id 写参数表并回读校验（Flash 持久化 Step 5） */
-            (void)param_id; (void)param_val;
-        }
-        break;
-
-    case CMD_PARAM_GET:
-        if (have_param_id)
-        {
-            /* TODO(Step 4+)：回帧 TLV_PARAM_VALUE */
-            (void)param_id;
-        }
-        break;
-
-    case CMD_ID_SET:
-        if (have_armor)
-        {
-            LedStatus_SetTeamColor(armor_id & 0x01u);
-            StateMachine_OnIdSet(false);          /* 慢闪 1s 后回 NORMAL */
-            /* TODO(Step 5)：Flash 持久化 armor_id */
-        }
-        break;
-
-    case CMD_SELF_TEST:
-        /* 非阻塞自检：结果经 STATUS_REPORT（TLV_TEXT 携带 ST OK/FAIL）回报；
-         * 运行中重复触发忽略（ACK 仍回）。 */
-        if (SelfTest_Request())
-        {
-            App_Log_Printf("[SELFTEST] requested via CAN\r\n");
-        }
-        else
-        {
-            App_Log_Printf("[SELFTEST] busy, request ignored\r\n");
-        }
-        break;
-
-    case CMD_ZERO_CAL:
-        /* TODO(Step 5)：当前基线固化 Flash */
-        break;
-
-    default:
-        return false;
-    }
-
-    /* 下行命令 seq≠0 → 回 ACK（经调度器重试） */
-    if (Protocol_AppFrame_RequiresAck(frame))
-    {
-        ProtocolAppFrame ack;
-        if (Protocol_AppAck_Build(frame, 0u, false, 0u, &ack))
-        {
-            (void)Service_RetryAckScheduler_Enqueue(&g_sched, &ack,
-                                                    PROTOCOL_PRIORITY_HIGH, false, 3u, 200u, NULL);
-        }
+        if (data[i] != 0u) { return false; }
     }
     return true;
 }
 
-/* ==================== 上行消息 ==================== */
-
-/* 心跳（0x01，U32 ms 时间戳，seq=0）；返回是否成功启动发送 */
-static bool Bc_SendHeartbeat(void)
+static bool Bc_ExecuteLedControl(const uint8_t data[8])
 {
-    ProtocolAppFrame f;
-    uint8_t buf[PROTOCOL_APP_FRAME_MAX_ENCODED_SIZE];
-    uint16_t len;
+    uint8_t i;
 
-    Protocol_AppFrame_Init(&f, BOARD_DST_ID, BOARD_SRC_ID, s_module_uid,
-                           FUNC_HEARTBEAT, 0u, PROTOCOL_TYPE_U32);
-    Protocol_AppFrame_SetU32(&f, HAL_GetTick());
-    if (!Protocol_AppFrame_Encode(&f, buf, &len, sizeof(buf)))
+    /* 故障/掉线指示属于安全状态机，远端灯控不得覆盖。 */
+    if (StateMachine_Get() == SM_STATE_FAULT || StateMachine_Get() == SM_STATE_COMM_LOST)
     {
         return false;
     }
-    if (Transport_Isotp_Send(&g_isotp, buf, len) != TRANSPORT_ISOTP_OK)
+
+    for (i = 2u; i < 8u; i++)
     {
-        return false;
+        if (data[i] != 0u) { return false; }
     }
-    s_sent_count++;
+
+    switch (data[0])
+    {
+    case BOARD_CAN_CMD_LED_NORMAL: LedStatus_SetEffect(LED_EFF_NORMAL); break;
+    case BOARD_CAN_CMD_TEAM_RED:   LedStatus_SetTeamColor(0u); break;
+    case BOARD_CAN_CMD_TEAM_BLUE:  LedStatus_SetTeamColor(1u); break;
+    case BOARD_CAN_CMD_BRIGHTNESS:
+        if (data[1] > 100u) { return false; }
+        LedStatus_SetBrightness(data[1]);
+        break;
+    case BOARD_CAN_CMD_EFFECT:
+        if (data[1] >= (uint8_t)LED_EFF_COUNT) { return false; }
+        LedStatus_SetEffect((led_effect_t)data[1]);
+        break;
+    default: return false;
+    }
     return true;
 }
 
-/* 状态上报（0x02，TLV_STATE + TLV_FAULT_FLAGS + 可选 TLV_TEXT，seq=0） */
-static void Bc_ReportStatusEx(uint16_t fault_flags, const char *text)
+/* 一次最多处理一个会产生发送的请求；避免同步 CAN 发送在单圈累积。 */
+static bool Bc_ProcessRxQueue(void)
 {
-    ProtocolAppFrame f;
-    ProtocolTlvWriter w;
-    uint8_t buf[PROTOCOL_APP_FRAME_MAX_ENCODED_SIZE];
-    uint16_t len;
-    const char *state = "normal";
-
-    switch (StateMachine_Get())
+    while (s_rx_rd != s_rx_wr)
     {
-    case SM_STATE_FAULT:       state = "fault";      break;
-    case SM_STATE_COMM_LOST:   state = "comm_lost";  break;
-    case SM_STATE_HIT:         state = "hit";        break;
-    case SM_STATE_ID_SETUP:    state = "id_setup";   break;
-    case SM_STATE_ID_CONFLICT: state = "id_conflict"; break;
-    default:                   state = "normal";     break;
-    }
-
-    Protocol_TlvWriter_Init(&w, buf, sizeof(buf));
-    Protocol_TlvWriter_AppendString(&w, PROTOCOL_TLV_STATE, state);
-    Protocol_TlvWriter_AppendU16(&w, TLV_FAULT_FLAGS, fault_flags);
-    if (text != NULL)
-    {
-        Protocol_TlvWriter_AppendString(&w, PROTOCOL_TLV_TEXT, text);
-    }
-
-    Protocol_AppFrame_Init(&f, BOARD_DST_ID, BOARD_SRC_ID, s_module_uid,
-                           FUNC_STATUS_REPORT, 0u, PROTOCOL_TYPE_TLV_STREAM);
-    Protocol_AppFrame_SetData(&f, buf, Protocol_TlvWriter_GetLength(&w));
-
-    if (Protocol_AppFrame_Encode(&f, buf, &len, sizeof(buf)))
-    {
-        if (Transport_Isotp_Send(&g_isotp, buf, len) == TRANSPORT_ISOTP_OK)
+        board_rx_item_t item = s_rx_queue[s_rx_rd];
+        s_rx_rd = (uint8_t)((s_rx_rd + 1u) % BOARD_RX_QUEUE_DEPTH);
+        if (item.id == CanNode_BusinessId(CAN_NODE_OFFSET_STATUS_QUERY))
         {
-            s_sent_count++;
+            (void)Bc_SendStatusReply();
+            return true;
+        }
+        else if (item.id == CanNode_BusinessId(CAN_NODE_OFFSET_NODE_ID_QUERY))
+        {
+            (void)Bc_SendNodeIdReply();
+            return true;
+        }
+        else if (item.id == CanNode_BusinessId(CAN_NODE_OFFSET_LED_CONTROL) && Bc_ExecuteLedControl(item.data))
+        {
+            (void)Bc_Send(CanNode_BusinessId(CAN_NODE_OFFSET_CONTROL_ACK), item.data, 8u);
+            return true;
+        }
+        else if (item.id == CanNode_BusinessId(CAN_NODE_OFFSET_HIT_ACK) && item.dlc == 1u &&
+                 s_hit_count != 0u && item.data[0] == s_hit_queue[s_hit_rd].sequence)
+        {
+            s_hit_rd = (uint8_t)((s_hit_rd + 1u) % BOARD_HIT_QUEUE_DEPTH);
+            s_hit_count--;
         }
     }
+    return false;
 }
 
-/* 状态上报（无文本；故障位图调用方传 Fault_GetBitmap()） */
-void BoardComm_ReportStatus(uint16_t fault_flags)
+static bool Bc_ProcessHitQueue(uint32_t now)
 {
-    Bc_ReportStatusEx(fault_flags, NULL);
-}
-
-/* 击打事件（0x31，TLV 流，seq=0 禁止重试） */
-void BoardComm_ReportHitEvent(const hit_event_t *e)
-{
-    ProtocolAppFrame f;
-    ProtocolTlvWriter w;
-    uint8_t buf[PROTOCOL_APP_FRAME_MAX_ENCODED_SIZE];
-    uint16_t len;
-
-    if (e == NULL)
+    if (s_hit_count != 0u && (now - s_last_hit_attempt_ms) >= BOARD_HIT_ACK_RETRY_MS)
     {
-        return;
-    }
-    /* COMM_LOST/FAULT 态不发送只计数（设计文档 11 章语义）；
-     * 同时避免无总线时击打路径上的 CAN 发送阻塞（2026-08-21） */
-    if (s_hb_lost != 0u || StateMachine_Get() == SM_STATE_FAULT)
-    {
-        return;
-    }
-
-    Protocol_TlvWriter_Init(&w, buf, sizeof(buf));
-    Protocol_TlvWriter_AppendU8(&w,  TLV_HIT_CHANNEL,   e->ch);
-    Protocol_TlvWriter_AppendU8(&w,  TLV_HIT_INTENSITY, e->intensity);
-    Protocol_TlvWriter_AppendU16(&w, TLV_HIT_FORCE,     e->force_01n);
-    Protocol_TlvWriter_AppendU32(&w, TLV_HIT_TS,        e->ts_ms);
-    Protocol_TlvWriter_AppendU32(&w, TLV_HIT_PEAK,      e->peak);
-
-    Protocol_AppFrame_Init(&f, BOARD_DST_ID, BOARD_SRC_ID, s_module_uid,
-                           FUNC_HIT_EVENT, 0u, PROTOCOL_TYPE_TLV_STREAM);
-    Protocol_AppFrame_SetData(&f, buf, Protocol_TlvWriter_GetLength(&w));
-
-    if (Protocol_AppFrame_Encode(&f, buf, &len, sizeof(buf)))
-    {
-        if (Transport_Isotp_Send(&g_isotp, buf, len) == TRANSPORT_ISOTP_OK)
+        s_last_hit_attempt_ms = now;
+        if (Bc_Send(CanNode_BusinessId(CAN_NODE_OFFSET_HIT_EVENT), s_hit_queue[s_hit_rd].data, 8u))
         {
-            s_sent_count++;
+            /* Keep the event until the L431 application confirms this
+             * sequence. CAN TXOK alone cannot prove its software consumed it. */
         }
+        return true;
     }
+    return false;
 }
-
-/* ==================== 初始化与主循环 ==================== */
 
 void BoardComm_Init(void)
 {
-    TransportIsotpConfig cfg;
-
-    Cal_GetDefaults(&s_param);
-    s_module_uid = (uint16_t)(HAL_GetUIDw0() & 0xFFFFu);
-
-    memset(&cfg, 0, sizeof(cfg));
-    cfg.port                    = APP_CAN_PORT_1;
-    cfg.tx_id                   = BOARD_CAN_TX_ID;
-    cfg.rx_id                   = BOARD_CAN_RX_ID;
-    cfg.block_size              = 0u;
-    cfg.st_min_ms               = 10u;
-    cfg.tx_timeout_ms           = 100u;
-    cfg.tx_require_flow_control = true;
-    cfg.get_ms                  = HAL_GetTick;
-    cfg.on_message              = Bc_OnMessage;
-    cfg.on_frame                = Bc_OnFrame;
-    cfg.on_tx_complete          = Bc_OnTxComplete;
-    cfg.user_arg                = NULL;
-    Transport_Isotp_Init(&g_isotp, &cfg);
-
-    Service_RetryAckScheduler_Init(&g_sched, Bc_SchedSend, Bc_SchedIdle, HAL_GetTick, NULL);
-    Service_Dispatcher_Init(&g_disp);
-    Service_Dispatcher_Register(&g_disp, FUNC_CTRL_CMD, Bc_HandleCtrlCmd, NULL);
-
+    uint32_t now = HAL_GetTick();
+    s_rx_wr = 0u; s_rx_rd = 0u; s_rx_drop = 0u;
+    s_hit_wr = 0u; s_hit_rd = 0u; s_hit_count = 0u; s_hit_drop = 0u;
+    s_last_fault_tx_ms = now;
+    s_last_fault_attempt_ms = now - BOARD_FAULT_REPEAT_MS;
+    s_last_reset_attempt_ms = now - BOARD_INIT_RETRY_MS;
+    s_last_init_attempt_ms = now - BOARD_INIT_RETRY_MS;
+    s_last_hit_attempt_ms = now - BOARD_HIT_ACK_RETRY_MS;
+    s_hit_sequence = 0u;
+    s_last_l431_rx_ms = now;
+    s_fault_last_sent = 0xFFFFu; /* 保证首次循环发送当前状态。 */
+    s_init_pending = 1u;
+    s_reset_pending = (ResetCause_GetLatched() != 0u) ? 1u : 0u;
+    s_sent_count = 0u; s_rx_count = 0u;
+    CanNode_Init();
     App_Can_SetRxCallback(Bc_CanRxBridge);
-
-    s_hb_last_ms = HAL_GetTick();
-    s_hb_lost = 0u;
-    s_last_hb_tx_ms = 0u;
-    /* 状态上报网格错开心跳网格 25ms：避免两者同迭代对齐时两次 5ms 发送阻塞
-     * 叠加成 10ms（超过 ADS 环形 8.2ms → 跳帧），错开后单次迭代最长阻塞 5ms < 环容量。 */
-    s_last_status_tx_ms = 25u;
-    /* 沿检测初值：故障位图初值 0——启动即有故障（如 ADC init 失败）时立即沿上报 */
-    s_last_faults_reported = 0u;
-    s_last_state_reported  = SM_STATE_BOOT;
-    s_last_edge_ms = 0u;
-    s_last_st_ms   = HAL_GetTick();   /* PVD 自动重试最早在 5s 后 */
 }
 
 void BoardComm_Loop(void)
 {
     uint32_t now = HAL_GetTick();
-    uint32_t cyc0 = DWT->CYCCNT;
+    uint16_t faults;
+    bool tx_attempted;
 
-    Transport_Isotp_Poll(&g_isotp);
-    Service_RetryAckScheduler_Poll(&g_sched);
-
-    /* Bus-Off 恢复（主循环上下文执行） */
     App_Can_RecoverBusOff();
+    StateMachine_OnCommLost((uint32_t)(now - s_last_l431_rx_ms) > BOARD_COMM_LOST_MS);
+    tx_attempted = CanNode_Task();
 
-    /* 心跳发送节拍（50ms = 20Hz）；连续失败退避：无总线时避免持续制造 CAN 错误 */
-    if ((now - s_last_hb_tx_ms) >= s_param.heartbeat_ms)
+    if (!CanNode_IsReady())
     {
-        s_last_hb_tx_ms = now;
-        if ((int32_t)(now - s_hb_pause_until) >= 0)
-        {
-            if (Bc_SendHeartbeat())
-            {
-                s_send_fail_streak = 0u;
-            }
-            else
-            {
-                s_send_fail_streak++;
-                if (s_send_fail_streak >= 3u)
-                {
-                    s_hb_pause_until = now + 500u;   /* 连续 3 次失败 → 退避 500ms */
-                    s_send_fail_streak = 0u;
-                }
-            }
-        }
+        return;
     }
 
-    /* 状态上报节拍（P24，默认 1Hz） */
-    if ((now - s_last_status_tx_ms) >= s_param.status_period_ms)
+    /* 异常复位启动时必须先发送 0x110，再发送初始化完成帧。 */
+    if (s_reset_pending != 0u && (now - s_last_reset_attempt_ms) >= BOARD_INIT_RETRY_MS)
     {
-        s_last_status_tx_ms = now;
-        BoardComm_ReportStatus(Fault_GetBitmap());
+        uint8_t data = ResetCause_GetLatched();
+        s_last_reset_attempt_ms = now;
+        if (Bc_Send(CanNode_BusinessId(CAN_NODE_OFFSET_RESET_CAUSE), &data, 1u)) { s_reset_pending = 0u; }
+        tx_attempted = true;
     }
 
-    /* 故障/状态变化沿即时上报（9.4：状态变化 + 周期）：
-     * - 故障位图变化（覆盖 FAULT 进出与故障类别切换）
-     * - 状态进入 FAULT/COMM_LOST（COMM_LOST 无位图变化）
-     * HIT/ID 闪灯态不即报（防 20Hz 击打刷屏），只记录跟随 1Hz 周期。 */
+    if (!tx_attempted && s_init_pending != 0u && (now - s_last_init_attempt_ms) >= BOARD_INIT_RETRY_MS)
     {
-        uint16_t faults_now = Fault_GetBitmap();
-        sm_state_t state_now = StateMachine_Get();
-        bool edge = false;
-
-        if (faults_now != s_last_faults_reported)
+        s_last_init_attempt_ms = now;
+        if (Bc_Send(CanNode_BusinessId(CAN_NODE_OFFSET_INIT_DONE), NULL, 0u)) { s_init_pending = 0u; }
+        tx_attempted = true;
+    }
+    if (!tx_attempted)
+    {
+        tx_attempted = Bc_ProcessRxQueue();
+    }
+    faults = HitDetect_GetFaultFlags();
+    if (!tx_attempted && ((faults != s_fault_last_sent) || ((faults != 0u) && ((now - s_last_fault_tx_ms) >= BOARD_FAULT_REPEAT_MS))) &&
+        ((now - s_last_fault_attempt_ms) >= BOARD_FAULT_REPEAT_MS))
+    {
+        uint8_t data[2];
+        s_last_fault_attempt_ms = now;
+        Bc_PutU16Le(data, faults);
+        if (Bc_Send(CanNode_BusinessId(CAN_NODE_OFFSET_FAULT_STATUS), data, sizeof(data)))
         {
-            s_last_faults_reported = faults_now;
-            edge = true;
+            s_fault_last_sent = faults;
+            s_last_fault_tx_ms = now;
         }
-        if (state_now != s_last_state_reported)
-        {
-            if (state_now == SM_STATE_FAULT || state_now == SM_STATE_COMM_LOST)
-            {
-                edge = true;
-            }
-            s_last_state_reported = state_now;
-        }
-        if (edge && ((int32_t)(now - s_last_edge_ms) >= 100))
-        {
-            s_last_edge_ms = now;
-            BoardComm_ReportStatus(faults_now);
-            s_last_status_tx_ms = now;   /* 抑制 1Hz 周期紧接的重复上报 */
-        }
+        tx_attempted = true;
     }
 
-    /* 自检完成 → STATUS_REPORT（TLV_TEXT 携带结果）；先同步沿基线防重复 */
+    if (!tx_attempted)
     {
-        self_test_t r;
-        if (SelfTest_TakeResult(&r))
-        {
-            char text[48];
-            if (r.overall == ST_RESULT_PASS)
-            {
-                snprintf(text, sizeof(text), "ST OK d=%lu",
-                         (unsigned long)r.drdy_hz);
-            }
-            else
-            {
-                snprintf(text, sizeof(text), "ST FAIL bits=0x%02X d=%lu",
-                         (unsigned int)r.fails, (unsigned long)r.drdy_hz);
-            }
-            s_last_faults_reported = Fault_GetBitmap();   /* 清 sticky 导致的位图变化不另发沿 */
-            Bc_ReportStatusEx(Fault_GetBitmap(), text);
-            s_last_status_tx_ms = now;
-        }
-    }
-
-    /* PVD 欠压自动重试（11 章"FAULT 每 5s 自动重试自检"，仅对可自愈的
-     * brownout；ADC init 失败的 sticky SPI 永不自愈，不触发避免空转） */
-    if (StateMachine_Get() == SM_STATE_FAULT &&
-        (Fault_GetSticky() & FAULT_POWER) != 0u &&
-        !SelfTest_IsRunning() &&
-        (int32_t)(now - s_last_st_ms) >= 5000)
-    {
-        s_last_st_ms = now;
-        (void)SelfTest_Request();
-        App_Log_Printf("[SELFTEST] auto-retry after PVD\r\n");
-    }
-
-    /* 心跳超时跟踪（P14=200ms）→ COMM_LOST */
-    if ((s_hb_lost == 0u) && ((now - s_hb_last_ms) >= s_param.comm_timeout_ms))
-    {
-        s_hb_lost = 1u;
-        StateMachine_OnCommLost(true);
-    }
-
-    /* 耗时统计：1s 窗口发布一次最大值 */
-    {
-        uint32_t dt = DWT->CYCCNT - cyc0;
-        s_bcloop_us = dt / 80u;
-        if (dt > s_bcloop_max_cyc)
-        {
-            s_bcloop_max_cyc = dt;
-        }
-        if ((int32_t)(now - s_bcloop_pub_ms) >= 1000)
-        {
-            s_bcloop_pub_ms = now;
-            s_bcloop_max_us = s_bcloop_max_cyc / 80u;
-            s_bcloop_max_cyc = 0u;
-        }
+        (void)Bc_ProcessHitQueue(now);
     }
 }
 
-/* RX 桥接：AppCanFrame → ISOTP（协议栈签名含 port） */
+void BoardComm_ReportHitEvent(const hit_event_t *e)
+{
+    board_hit_item_t *item;
+    if (e == NULL) { return; }
+    if (s_hit_count >= BOARD_HIT_QUEUE_DEPTH) { s_hit_drop++; return; }
+
+    item = &s_hit_queue[s_hit_wr];
+    item->sequence = s_hit_sequence++;
+    /* HIT v2 keeps the useful diagnostics while adding a de-duplication key:
+     * seq, channel, intensity, force[2], peak low 24 bits. */
+    item->data[0] = item->sequence;
+    item->data[1] = e->ch;
+    item->data[2] = e->intensity;
+    Bc_PutU16Le(&item->data[3], e->force_01n);
+    item->data[5] = (uint8_t)e->peak;
+    item->data[6] = (uint8_t)(e->peak >> 8);
+    item->data[7] = (uint8_t)(e->peak >> 16);
+    s_hit_wr = (uint8_t)((s_hit_wr + 1u) % BOARD_HIT_QUEUE_DEPTH);
+    s_hit_count++;
+}
+
+void BoardComm_ReportStatus(uint16_t fault_flags)
+{
+    (void)fault_flags;
+    /* 故障位图由 BoardComm_Loop 统一仲裁发送，保证每圈最多一帧。 */
+    s_fault_last_sent = 0xFFFFu;
+}
+
+/* CAN RX ISR context: only supported small-frame queue handling. */
 static void Bc_CanRxBridge(AppCanPort port, const AppCanFrame *frame)
 {
-    Transport_Isotp_OnCanFrame(&g_isotp, port, frame);
+    uint8_t next;
+    if (port != APP_CAN_PORT_1 || frame == NULL || frame->is_extended_id != 0u) { return; }
+
+    CanNode_OnRxIsr(frame);
+    if (!CanNode_IsReady()) { return; }
+
+    if (!((frame->can_id == CanNode_BusinessId(CAN_NODE_OFFSET_STATUS_QUERY) &&
+           (frame->dlc == 0u || (frame->dlc == 8u && Bc_AllZero(frame->data)))) ||
+          (frame->can_id == CanNode_BusinessId(CAN_NODE_OFFSET_NODE_ID_QUERY) && frame->dlc == 0u) ||
+          (frame->can_id == CanNode_BusinessId(CAN_NODE_OFFSET_LED_CONTROL) && frame->dlc == 8u) ||
+          (frame->can_id == CanNode_BusinessId(CAN_NODE_OFFSET_HIT_ACK) && frame->dlc == 1u))) { return; }
+
+    /* A correctly addressed L431 request is the heartbeat.  Do not count
+     * unrelated CAN traffic as proof that the referee/power manager is alive. */
+    s_last_l431_rx_ms = HAL_GetTick();
+
+    next = (uint8_t)((s_rx_wr + 1u) % BOARD_RX_QUEUE_DEPTH);
+    if (next == s_rx_rd) { s_rx_drop++; return; }
+    s_rx_queue[s_rx_wr].id = (uint16_t)frame->can_id;
+    s_rx_queue[s_rx_wr].dlc = frame->dlc;
+    memcpy(s_rx_queue[s_rx_wr].data, frame->data, sizeof(frame->data));
+    s_rx_wr = next;
+    s_rx_count++;
 }

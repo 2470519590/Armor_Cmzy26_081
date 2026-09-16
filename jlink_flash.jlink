@@ -1,0 +1,6 @@
+// Generated for Armor_Cmzy26_081 / STM32L432KB.
+// Invoked by the VS Code task "STM32: Flash HEX (J-Link)".
+loadfile build/Armor_Cmzy26_081.hex
+r
+g
+exit

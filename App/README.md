@@ -24,24 +24,18 @@ App/
 │  ├─ hit_detect.h/.c           击打检测管线（融合模型）【桩 Step2】← 第 7 章
 │  └─ calibration.h/.c          参数表 P01~P24 + Flash 持久化【参数表已就绪，持久化桩 Step5】← 7.4/7.7
 ├─ comm/
-│  ├─ app_can.h                 拷贝自 isotp 栈（平台无关接口，勿改）
-│  ├─ app_can.c                 CAN 适配层 L432 绑定【Init 已可用，发送/分发桩 Step4】← 9.2
-│  ├─ app_log.h                 拷贝自 isotp 栈（勿改）
+│  ├─ app_can.h                 CAN 平台抽象接口
+│  ├─ app_can.c                 CAN 适配层 L432 绑定（500kbps、过滤、Bus-Off 恢复）
+│  ├─ app_log.h                 日志接口
 │  ├─ app_log.c                 USART1 阻塞日志【可用】← 9.2
-│  ├─ board_comm.h/.c           本板消息集（心跳/状态/击打事件/下行命令）【桩 Step4】← 9.3/9.4
-│  ├─ transport/isotp.h/.c      拷贝自 isotp 栈【勿改】← 9.1
-│  ├─ protocol/app_frame.h/.c   拷贝自 isotp 栈【勿改】
-│  ├─ protocol/tlv.h/.c         拷贝自 isotp 栈【勿改】
-│  ├─ protocol/app_ack.h/.c     拷贝自 isotp 栈【勿改】
-│  ├─ service/dispatcher.h/.c   拷贝自 isotp 栈【勿改】
-│  └─ service/retry_ack_scheduler.h/.c  拷贝自 isotp 栈【勿改】
+│  └─ board_comm.h/.c           NodeID 槽位业务帧（0x130~0x167、故障/击打/控制）← Docs/CAN_PROTOCOL.md
 └─ app/
    ├─ main_app.h/.c             编排：App_Init/App_Loop/App_OnTick1ms + TIM 回调【骨架自证可用】← 5.3/第 10 章
    ├─ state_machine.h/.c        七状态机【桩 Step2/5】← 第 11 章
    └─ led_status.h/.c           六灯效联动【桩 Step3】← 8.2
 ```
 
-标注说明：**【拷贝自 isotp 栈 · 勿改】**＝逐字拷贝自 `Driver_Examples/stm32-referee-isotp-stack`，升级协议栈时整体替换；**【桩 StepN】**＝接口已定型、实现待第 N 步填充；其余为可正常工作的骨架实现。
+标注说明：**【桩 StepN】**＝接口已定型、实现待第 N 步填充；其余为可正常工作的骨架实现。
 
 ## 3. 分层与依赖规则
 
@@ -125,7 +119,7 @@ App/
 
 - **K=32 帧环形缓冲**（`ADS_RING_DEPTH`，32×18B=576B）：DRDY EXTI 取空闲槽写、槽满跳帧 + `drop_cnt` 计数；主循环按读指针消费（写指针仅 ISR、读指针仅主循环，R17）。
 - WS2812 帧缓冲：`WS2812_FRAME_BYTES`=118B（13×8+14），DMA 发送 ≈404µs，20Hz 刷新。
-- ISOTP 收发缓冲（各 512B）与调度队列（8×263B）位于协议栈内部（Step4 实例化后占用）。
+- CAN 接收队列和击打事件队列均为 4 项固定帧缓冲；CAN 暂时发送失败时击打事件按 10ms 节拍重试。
 - 事件流：ADS 帧 → `HitDetect_Feed` → `hit_event_t`（合力峰值 + `peak_ch[4]` + 预留 impulse/duration）→ `BoardComm_ReportHitEvent`。
 
 ## 12. 扩展配方（step-by-step 文件清单）
@@ -133,7 +127,7 @@ App/
 | 场景 | 步骤 |
 |---|---|
 | **新增 BSP 设备** | ① `App/bsp/xxx.h/.c`（模块前缀 `Xxx_`）；② 外设句柄 extern 加入 `board.h`；③ `app.mk` 两行；④ `main_app.c` 的 `App_Init` 调 `Xxx_Init()` |
-| **新增协议消息** | ① `board_comm.h` 加功能码/TLV 常量；② `board_comm.c` 实现构造/解析；③ 同步《通信协议v2》与《设计方案》9.4；④ 与协议维护者确认 ID（R15） |
+| **新增协议消息** | ① `board_comm.h` 分配固定 CAN ID；② `board_comm.c` 实现固定 DLC 的构造/解析；③ 同步 `Docs/CAN_PROTOCOL.md` 与《设计方案》第 9 章 |
 | **新增可调参数** | ① `hit_param_t` 加字段；② `Cal_GetDefaults` 默认值；③ 下行参数 ID 映射（Step4 的 CMD_PARAM_SET/GET）；④ 同步《设计方案》7.4 |
 | **新增灯效/状态** | ① `led_effect_t`/`sm_state_t` 加枚举值；② `led_status.c` 灯效生成；③ `state_machine.c` 转移条件；④ 同步《设计方案》8.2/11 章表 |
 

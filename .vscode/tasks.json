@@ -1,0 +1,75 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "STM32: Build",
+      "type": "process",
+      "command": "E:\\GnuWin32\\bin\\make.exe",
+      "args": ["-j2", "all"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": {
+        "owner": "cpp",
+        "fileLocation": "relative",
+        "pattern": {
+          "regexp": "^(.*):(\\d+):(\\d+):\\s+(warning|error):\\s+(.*)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "severity": 4,
+          "message": 5
+        }
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": false
+      }
+    },
+    {
+      "label": "STM32: Flash HEX (J-Link)",
+      "type": "process",
+      "command": "C:\\Program Files\\JLink_V960\\JLink.exe",
+      "args": [
+        "-device", "STM32L432KB",
+        "-if", "SWD",
+        "-speed", "4000",
+        "-autoconnect", "1",
+        "-ExitOnError", "1",
+        "-CommanderScript", "${workspaceFolder}\\jlink_flash.jlink"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "dependsOn": ["STM32: Build"],
+      "dependsOrder": "sequence",
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": false
+      }
+    },
+    {
+      "label": "STM32: Build and Flash",
+      "dependsOn": ["STM32: Flash HEX (J-Link)"],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "STM32: Clean",
+      "type": "process",
+      "command": "E:\\GnuWin32\\bin\\make.exe",
+      "args": ["clean"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    }
+  ]
+}

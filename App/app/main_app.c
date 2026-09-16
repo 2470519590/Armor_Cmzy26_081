@@ -23,6 +23,7 @@
 #include "app/led_status.h"
 #include "app/faults.h"
 #include "app/self_test.h"
+#include "app/reset_cause.h"
 
 /* ---- 运行参数（Step 5 起从 Flash 载入标定值） ---- */
 static hit_param_t s_param;
@@ -43,11 +44,17 @@ static volatile uint32_t s_iter_us;        /* 最近一次 App_Loop 迭代耗时
 static volatile uint32_t s_loop_max_us;    /* 1s 窗口内单次迭代最大耗时 */
 static uint32_t s_loop_max_cyc;
 
+/* PVD 欠压恢复：FAULT_POWER sticky 后 5s 自动重试自检
+ * （原 44bfd88 board_comm 职责，随固定帧通信层替换上移到固件层）。 */
+static uint32_t s_last_st_retry_ms;
+
 /* 最近一帧解析结果（调试器实时观察 ADC 数据用，每 256µs 更新一次） */
 static volatile ads_frame_t s_last_frame;
 
 void App_Init(void)
 {
+    ResetCause_Init();
+
     /* 参数：骨架阶段用默认值；TODO(Step 5)：Cal_Load 从 Flash 恢复标定值。 */
     Cal_GetDefaults(&s_param);
 
@@ -70,15 +77,16 @@ void App_Init(void)
     LedStatus_SetTeamColor(s_param.team_color);
     LedStatus_SetBrightness(s_param.brightness);
     StateMachine_Init();       /* Step 3：BOOT→NORMAL/HIT/FAULT 基础版 */
-    BoardComm_Init();          /* Step 4：协议栈实例化 */
+    BoardComm_Init();          /* 固定帧 CAN 协议初始化 */
 
-    /* 上电自检（7.6）：非阻塞，结果经 STATUS_REPORT 上报；
+    /* 上电自检（7.6）：非阻塞，结果经故障位图/STATUS_REPLY 反映；
      * ADC 初始化失败时不发起（sticky FAULT_SPI 已直接进入 FAULT 链路）。 */
     SelfTest_Init(&s_param);
     if (ADS131M04_IsInitOk())
     {
         (void)SelfTest_Request();
     }
+    s_last_st_retry_ms = HAL_GetTick();
 
     /* DWT 周期计数器使能（主循环阻塞测量，调试器 halt 期间 CYCCNT 冻结，不影响测量） */
     CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
@@ -115,7 +123,12 @@ void App_Loop(void)
         if (HitDetect_GetEvent(&ev))
         {
             StateMachine_OnHitEvent(&ev);
-            BoardComm_ReportHitEvent(&ev);   /* Step 4：击打事件经 CAN 上报核心板 */
+            /* Fault and CAN-link-loss states may still observe a vibration,
+             * but must never turn it into a referee hit/HP deduction. */
+            if (StateMachine_Get() == SM_STATE_HIT)
+            {
+                BoardComm_ReportHitEvent(&ev);   /* 击打事件经 CAN 上报核心板 */
+            }
             App_Log_Printf("[HIT] sum_peak=%lu p0=%lu p1=%lu p2=%lu p3=%lu I=%u%%\r\n",
                            (unsigned long)ev.peak,
                            (unsigned long)ev.peak_ch[0], (unsigned long)ev.peak_ch[1],
@@ -130,6 +143,18 @@ void App_Loop(void)
     }
 
     BoardComm_Loop();
+
+    /* PVD 欠压恢复（自 44bfd88 通信层上移，行为不变）：
+     * FAULT 态 + sticky FAULT_POWER + 自检空闲 → 每 5s 自动重试自检。 */
+    if (StateMachine_Get() == SM_STATE_FAULT &&
+        (Fault_GetSticky() & FAULT_POWER) != 0u &&
+        !SelfTest_IsRunning() &&
+        (int32_t)(HAL_GetTick() - s_last_st_retry_ms) >= 5000)
+    {
+        s_last_st_retry_ms = HAL_GetTick();
+        (void)SelfTest_Request();
+        App_Log_Printf("[SELFTEST] auto-retry after PVD\r\n");
+    }
 
     /* 非阻塞日志刷出：每圈 2 字符（≈174µs），帧消费优先、日志其次（2026-08-21） */
     App_Log_FlushSmall(2u);

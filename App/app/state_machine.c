@@ -21,6 +21,7 @@
 
 static volatile sm_state_t s_state = SM_STATE_BOOT;
 static volatile uint32_t   s_state_ms;   /* 当前状态已驻留 ms 数（1kHz 累计） */
+static volatile uint8_t    s_comm_lost;  /* 通信层置位；在 BOOT 结束后仍须持续生效 */
 
 /* 进入 FAULT（故障灯效由 led_status 按 Fault_GetBitmap 分类生成） */
 static void Sm_ToFault(void)
@@ -34,12 +35,38 @@ void StateMachine_Init(void)
 {
     s_state = SM_STATE_BOOT;
     s_state_ms = 0u;
+    s_comm_lost = 0u;
     LedStatus_SetEffect(LED_EFF_BOOT);
 }
 
 void StateMachine_Tick(void)
 {
     s_state_ms++;
+
+    /* 安全状态优先于 BOOT/HIT/ID 等暂态。这样即使 BOOT 在掉线后完成，
+     * 也不会把 COMM_LOST 覆盖为 NORMAL。
+     * 合并自 44bfd88(faults 统一注册表) 与 83bd9e7(COMM_LOST 锁存)：
+     * 顶层门统一以 Fault_GetBitmap() 判定，满足「任一态故障 ≤1ms 进 FAULT」。 */
+    if (Fault_GetBitmap() != 0u)
+    {
+        if (s_state != SM_STATE_FAULT)
+        {
+            s_state = SM_STATE_FAULT;
+            s_state_ms = 0u;
+            LedStatus_SetEffect(LED_EFF_FAULT);
+        }
+        return;
+    }
+    if (s_comm_lost != 0u)
+    {
+        if (s_state != SM_STATE_COMM_LOST)
+        {
+            s_state = SM_STATE_COMM_LOST;
+            s_state_ms = 0u;
+            LedStatus_SetEffect(LED_EFF_COMM_LOST);
+        }
+        return;
+    }
 
     switch (s_state)
     {
@@ -113,6 +140,7 @@ void StateMachine_OnCommLost(bool lost)
 {
     if (lost)
     {
+        s_comm_lost = 1u;
         if (s_state != SM_STATE_FAULT)
         {
             s_state = SM_STATE_COMM_LOST;
@@ -122,6 +150,7 @@ void StateMachine_OnCommLost(bool lost)
     }
     else
     {
+        s_comm_lost = 0u;
         if (s_state == SM_STATE_COMM_LOST)
         {
             s_state = SM_STATE_NORMAL;
