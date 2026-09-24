@@ -13,7 +13,15 @@
 ######################################
 # target
 ######################################
-TARGET = Armor_Cmzy26_081
+TARGET = Armor_Cmzy26_081_$(SLOT)
+SLOT ?= A
+ifeq ($(SLOT),A)
+ SLOT_OFFSET = 0x00004000
+else ifeq ($(SLOT),B)
+ SLOT_OFFSET = 0x00010000
+else
+$(error SLOT must be A or B)
+endif
 
 
 ######################################
@@ -29,7 +37,7 @@ OPT = -Og
 # paths
 #######################################
 # Build path
-BUILD_DIR = build
+BUILD_DIR = build_$(SLOT)
 
 ######################################
 # source
@@ -120,6 +128,7 @@ AS_DEFS =
 C_DEFS =  \
 -DUSE_HAL_DRIVER \
 -DSTM32L432xx
+C_DEFS += -DUSER_VECT_TAB_ADDRESS -DVECT_TAB_OFFSET=$(SLOT_OFFSET)
 
 
 # AS includes
@@ -157,7 +166,7 @@ CFLAGS += -MMD -MP -MF"$(@:%.o=%.d)"
 # LDFLAGS
 #######################################
 # link script
-LDSCRIPT = STM32L432xx_FLASH.ld
+LDSCRIPT = STM32L432xx_SLOT_$(SLOT).ld
 
 # libraries
 LIBS = -lc -lm -lnosys 
@@ -188,7 +197,7 @@ $(BUILD_DIR)/%.o: %.s Makefile | $(BUILD_DIR)
 $(BUILD_DIR)/%.o: %.S Makefile | $(BUILD_DIR)
 	$(AS) -c $(CFLAGS) $< -o $@
 
-$(BUILD_DIR)/$(TARGET).elf: $(OBJECTS) Makefile
+$(BUILD_DIR)/$(TARGET).elf: $(OBJECTS) Makefile $(LDSCRIPT)
 	$(CC) $(OBJECTS) $(LDFLAGS) -o $@
 	$(SZ) $@
 

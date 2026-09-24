@@ -1,7 +1,14 @@
 /build
+/build_A/
+/build_B/
 /.cache
 /ref/
-/tools/vendor/
 /tools/*.csv
 /tools/*.log
 /tools/__pycache__/
+/tools/**/*.log
+/tools/**/*.csv
+/*.csv
+/*.log
+/Ozone_Watched_Data_*.csv
+/decoder--*.csv

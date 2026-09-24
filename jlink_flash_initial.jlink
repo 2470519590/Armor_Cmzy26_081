@@ -1,0 +1,8 @@
+// Initial CAN Bootloader image: Boot + Slot A + metadata.
+// Invoked by the VS Code task "STM32: Flash Initial Image (J-Link)".
+erase
+loadbin build/initial_image.bin, 0x08000000
+verifybin build/initial_image.bin, 0x08000000
+r
+g
+exit

@@ -29,6 +29,10 @@
 
 ## 关键文档与操作
 
+- [docs_canboot/使用说明.md](docs_canboot/使用说明.md)：CAN Bootloader 构建、首次 SWD 和日常升级操作。
+- [docs_canboot/CAN_BOOT升级计划书.md](docs_canboot/CAN_BOOT升级计划书.md)：协议、架构和风险边界。
+- [docs_canboot/开发进度表.md](docs_canboot/开发进度表.md)：交接进度和人工测试记录。
+
 - [App/README.md](App/README.md)：应用层目录、构建和中断约束。
 - [Docs/CAN_PROTOCOL.md](Docs/CAN_PROTOCOL.md)：唯一 CAN 协议定义。
 - [Docs/装甲模块固件设计方案.md](Docs/装甲模块固件设计方案.md)：硬件、采样与检测算法设计。

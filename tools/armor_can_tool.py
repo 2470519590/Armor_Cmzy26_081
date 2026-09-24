@@ -162,6 +162,37 @@ class ControlCan:
             )),
         )
 
+    def transmit_many(self, frames: list[tuple[int, bytes]]) -> None:
+        """Transmit a batch in one ControlCAN call.
+
+        ControlCAN returns the number of frames accepted.  Keeping the batch
+        bounded by the caller's CAN window avoids filling the adapter queue
+        while removing one Python/DLL transition per frame.
+        """
+        if not frames:
+            return
+        batch = VCI_CAN_OBJ_ARRAY(len(frames))
+        for index, (can_id, data) in enumerate(frames):
+            if not 0 <= can_id <= 0x7FF or not 0 <= len(data) <= 8:
+                raise ValueError("invalid standard CAN frame in batch")
+            payload = bytes(data).ljust(8, b"\x00")
+            obj = batch.STRUCT_ARRAY[index]
+            obj.ID = can_id
+            obj.TimeStamp = 0
+            obj.TimeFlag = 0
+            obj.SendType = 1
+            obj.RemoteFlag = 0
+            obj.ExternFlag = 0
+            obj.DataLen = len(data)
+            obj.Data[:] = payload
+            obj.Reserved[:] = b"\x00\x00\x00"
+        result = int(self.dll.VCI_Transmit(
+            self.device_type, self.device_index, self.tx_channel,
+            byref(batch.STRUCT_ARRAY[0]), len(frames)
+        ))
+        if result != len(frames):
+            raise RuntimeError(f"VCI_Transmit(batch={len(frames)}) accepted {result}")
+
     def receive(self) -> list[CanFrame]:
         count = int(self.dll.VCI_Receive(
             self.device_type, self.device_index, self.rx_channel,

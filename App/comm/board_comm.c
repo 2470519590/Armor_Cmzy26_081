@@ -12,6 +12,7 @@
 #include "board.h"
 #include "comm/app_can.h"
 #include "comm/can_node.h"
+#include "comm/fw_entry.h"
 #include "app/led_status.h"
 #include "app/main_app.h"
 #include "app/reset_cause.h"
@@ -261,6 +262,7 @@ void BoardComm_Init(void)
     s_reset_pending = (ResetCause_GetLatched() != 0u) ? 1u : 0u;
     s_sent_count = 0u; s_rx_count = 0u;
     CanNode_Init();
+    FwEntry_Init();
     App_Can_SetRxCallback(Bc_CanRxBridge);
 }
 
@@ -273,6 +275,17 @@ void BoardComm_Loop(void)
     App_Can_RecoverBusOff();
     StateMachine_OnCommLost((uint32_t)(now - s_last_l431_rx_ms) > BOARD_COMM_LOST_MS);
     tx_attempted = CanNode_Task();
+    (void)FwEntry_Task();
+
+    /* Once a valid firmware selection starts, stop the competition CAN
+       service immediately.  The next ENTER frame resets into Bootloader;
+       this short gate prevents business frames from being emitted while the
+       PC is switching the board into maintenance mode, even with L431 still
+       present on the bus. */
+    if (FwEntry_IsMaintenance())
+    {
+        return;
+    }
 
     if (!CanNode_IsReady())
     {
@@ -354,6 +367,7 @@ static void Bc_CanRxBridge(AppCanPort port, const AppCanFrame *frame)
     if (port != APP_CAN_PORT_1 || frame == NULL || frame->is_extended_id != 0u) { return; }
 
     CanNode_OnRxIsr(frame);
+    FwEntry_OnRxIsr(frame);
     if (!CanNode_IsReady()) { return; }
 
     if (!((frame->can_id == CanNode_BusinessId(CAN_NODE_OFFSET_STATUS_QUERY) &&

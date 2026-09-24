@@ -24,6 +24,7 @@
 #include "app/faults.h"
 #include "app/self_test.h"
 #include "app/reset_cause.h"
+#include "comm/fw_layout.h"
 
 /* ---- 运行参数（Step 5 起从 Flash 载入标定值） ---- */
 static hit_param_t s_param;
@@ -104,6 +105,18 @@ void App_Loop(void)
 
     /* --- 自检步进（IDLE 立即返回）；运行期间自检独占帧消费 --- */
     SelfTest_Poll();
+    if (RTC->BKP2R == FW_TRIAL_MAGIC && !SelfTest_IsRunning())
+    {
+        self_test_t result;
+        if (SelfTest_TakeResult(&result) && result.overall == ST_RESULT_PASS)
+        {
+            RCC->APB1ENR1 |= RCC_APB1ENR1_PWREN | RCC_APB1ENR1_RTCAPBEN;
+            PWR->CR1 |= PWR_CR1_DBP;
+            RTC->BKP2R = FW_CONFIRM_MAGIC;
+            __DSB();
+            NVIC_SystemReset();
+        }
+    }
 
     /* --- 帧消费 + 检测管线（Step 1/2 起启用；自检运行期由 SelfTest_Poll 消费并喂管线） --- */
     if (!SelfTest_IsRunning() && ADS131M04_IsFrameReady())

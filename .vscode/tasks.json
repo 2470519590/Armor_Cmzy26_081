@@ -56,6 +56,80 @@
       }
     },
     {
+      "label": "STM32: Build Slot A",
+      "type": "process",
+      "command": "E:\\GnuWin32\\bin\\make.exe",
+      "args": ["-j2", "SLOT=A", "all"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": false }
+    },
+    {
+      "label": "STM32: Build Slot B",
+      "type": "process",
+      "command": "E:\\GnuWin32\\bin\\make.exe",
+      "args": ["-j2", "SLOT=B", "all"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": false }
+    },
+    {
+      "label": "STM32: Build A+B",
+      "dependsOn": ["STM32: Build Slot A", "STM32: Build Slot B"],
+      "dependsOrder": "parallel",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": false }
+    },
+    {
+      "label": "STM32: Build Bootloader",
+      "type": "process",
+      "command": "E:\\GnuWin32\\bin\\make.exe",
+      "args": ["-j2", "-C", "Boot"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": false }
+    },
+    {
+      "label": "STM32: Generate Initial Image",
+      "type": "process",
+      "command": "python",
+      "args": ["tools\\make_initial_image.py", "--boot", "Boot\\build\\armor_boot.bin", "--slot-a", "build_A\\Armor_Cmzy26_081_A.bin", "--output", "build\\initial_image.bin"],
+      "options": { "cwd": "${workspaceFolder}" },
+      "dependsOn": ["STM32: Build Bootloader", "STM32: Build Slot A"],
+      "dependsOrder": "sequence",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": false }
+    },
+    {
+      "label": "STM32: Build All Firmware",
+      "dependsOn": ["STM32: Generate Initial Image", "STM32: Build Slot B"],
+      "dependsOrder": "sequence",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared", "clear": false }
+    },
+    {
+      "label": "STM32: Flash Initial Image (J-Link)",
+      "type": "process",
+      "command": "C:\\Program Files\\JLink_V960\\JLink.exe",
+      "args": [
+        "-device", "STM32L432KB",
+        "-if", "SWD",
+        "-speed", "4000",
+        "-autoconnect", "1",
+        "-ExitOnError", "1",
+        "-CommanderScript", "${workspaceFolder}\\jlink_flash_initial.jlink"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [],
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared",
+        "clear": false
+      }
+    },
+    {
       "label": "STM32: Build and Flash",
       "dependsOn": ["STM32: Flash HEX (J-Link)"],
       "dependsOrder": "sequence",

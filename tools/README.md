@@ -1,5 +1,18 @@
 # 装甲板 CAN 调参与报文工具
 
+CAN Bootloader 的主入口是同目录下的 `armor_fw_update.py`。它依赖本文件中的
+`armor_can_tool.py`，不要复制或改用另一个 ControlCAN 封装。
+
+快速升级：
+
+```powershell
+python tools\armor_fw_update.py --list --channel 1
+python tools\armor_fw_update.py --channel 1
+```
+
+完整的首次烧录和 L431 静默流程见
+[`../docs_canboot/使用说明.md`](../docs_canboot/使用说明.md)。
+
 `armor_can_tool.py` 是 Python 3.10 命令行工具，直接通过 `ctypes` 调用 CAN 分析仪厂商的 64 位 `ControlCAN.dll`。结构体和 API 调用方式来自本机示例目录：
 
 `C:\Users\24705\Desktop\文档\CAN分析仪二次开发示例源代码20250326\python(x64)\python3.8.0推荐`

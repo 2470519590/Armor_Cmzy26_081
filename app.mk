@@ -11,6 +11,7 @@ App/detect/calibration.c \
 App/comm/app_can.c \
 App/comm/app_log.c \
 App/comm/can_node.c \
+App/comm/fw_entry.c \
 App/comm/board_comm.c \
 App/app/state_machine.c \
 App/app/led_status.c \
