@@ -13,6 +13,7 @@
 #include "comm/app_can.h"
 #include "comm/can_node.h"
 #include "app/led_status.h"
+#include "app/main_app.h"
 #include "app/reset_cause.h"
 #include "app/state_machine.h"
 #include "bsp/temp_mon.h"
@@ -27,6 +28,9 @@
 #define BOARD_CAN_SEND_TIMEOUT   2u
 #define BOARD_COMM_LOST_MS        300u
 #define BOARD_HIT_ACK_RETRY_MS    100u
+#define BOARD_PARAM_P04_THR_HIT   0x04u
+#define BOARD_PARAM_RESULT_OK     0x00u
+#define BOARD_PARAM_RESULT_INVALID 0x01u
 
 typedef struct { uint16_t id; uint8_t dlc; uint8_t data[8]; } board_rx_item_t;
 typedef struct { uint8_t data[8]; uint8_t sequence; } board_hit_item_t;
@@ -148,6 +152,47 @@ static bool Bc_ExecuteLedControl(const uint8_t data[8])
     return true;
 }
 
+static uint32_t Bc_ReadU32Le(const uint8_t *data)
+{
+    return (uint32_t)data[0] | ((uint32_t)data[1] << 8) |
+           ((uint32_t)data[2] << 16) | ((uint32_t)data[3] << 24);
+}
+
+static bool Bc_SendParameterAck(uint8_t parameter, uint8_t result,
+                                uint32_t value, uint8_t sequence)
+{
+    uint8_t data[8] = {0u};
+    data[0] = parameter;
+    data[1] = result;
+    data[2] = (uint8_t)value;
+    data[3] = (uint8_t)(value >> 8);
+    data[4] = (uint8_t)(value >> 16);
+    data[5] = (uint8_t)(value >> 24);
+    data[6] = sequence;
+    return Bc_Send(CanNode_BusinessId(CAN_NODE_OFFSET_PARAM_ACK), data, sizeof(data));
+}
+
+static bool Bc_ProcessParameterSet(const board_rx_item_t *item)
+{
+    uint32_t requested;
+    uint32_t applied = 0u;
+    uint8_t result = BOARD_PARAM_RESULT_INVALID;
+
+    if (item->dlc != 8u || item->data[5] != 0u || item->data[7] != 0u)
+    {
+        return false;
+    }
+    requested = Bc_ReadU32Le(&item->data[1]);
+    if (item->data[0] == BOARD_PARAM_P04_THR_HIT &&
+        App_SetHitThreshold(requested, &applied) != 0u)
+    {
+        result = BOARD_PARAM_RESULT_OK;
+        applied = requested;
+    }
+    (void)Bc_SendParameterAck(item->data[0], result, applied, item->data[6]);
+    return true;
+}
+
 /* 一次最多处理一个会产生发送的请求；避免同步 CAN 发送在单圈累积。 */
 static bool Bc_ProcessRxQueue(void)
 {
@@ -169,6 +214,10 @@ static bool Bc_ProcessRxQueue(void)
         {
             (void)Bc_Send(CanNode_BusinessId(CAN_NODE_OFFSET_CONTROL_ACK), item.data, 8u);
             return true;
+        }
+        else if (item.id == CanNode_BusinessId(CAN_NODE_OFFSET_PARAM_SET))
+        {
+            return Bc_ProcessParameterSet(&item);
         }
         else if (item.id == CanNode_BusinessId(CAN_NODE_OFFSET_HIT_ACK) && item.dlc == 1u &&
                  s_hit_count != 0u && item.data[0] == s_hit_queue[s_hit_rd].sequence)
@@ -311,6 +360,7 @@ static void Bc_CanRxBridge(AppCanPort port, const AppCanFrame *frame)
            (frame->dlc == 0u || (frame->dlc == 8u && Bc_AllZero(frame->data)))) ||
           (frame->can_id == CanNode_BusinessId(CAN_NODE_OFFSET_NODE_ID_QUERY) && frame->dlc == 0u) ||
           (frame->can_id == CanNode_BusinessId(CAN_NODE_OFFSET_LED_CONTROL) && frame->dlc == 8u) ||
+          (frame->can_id == CanNode_BusinessId(CAN_NODE_OFFSET_PARAM_SET) && frame->dlc == 8u) ||
           (frame->can_id == CanNode_BusinessId(CAN_NODE_OFFSET_HIT_ACK) && frame->dlc == 1u))) { return; }
 
     /* A correctly addressed L431 request is the heartbeat.  Do not count

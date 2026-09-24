@@ -170,6 +170,21 @@ void App_Loop(void)
     }
 }
 
+uint8_t App_SetHitThreshold(uint32_t threshold, uint32_t *applied)
+{
+    if (threshold < APP_HIT_THRESHOLD_MIN || threshold > APP_HIT_THRESHOLD_MAX)
+    {
+        return 0u;
+    }
+    s_param.thr_hit = (int32_t)threshold;
+    HitDetect_UpdateParams(&s_param);
+    if (applied != NULL)
+    {
+        *applied = threshold;
+    }
+    return 1u;
+}
+
 void App_OnTick1ms(void)
 {
     s_tick_ms++;

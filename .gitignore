@@ -1,3 +1,7 @@
 /build
 /.cache
 /ref/
+/tools/vendor/
+/tools/*.csv
+/tools/*.log
+/tools/__pycache__/

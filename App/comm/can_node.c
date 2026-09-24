@@ -148,6 +148,6 @@ bool CanNode_IsReady(void) { return can_node_diag.state == NODE_READY && can_nod
 uint8_t CanNode_GetId(void) { return CanNode_IsReady() ? can_node_diag.node_id : 0u; }
 uint16_t CanNode_BusinessId(uint8_t offset)
 {
-    if (!CanNode_IsReady() || offset > CAN_NODE_OFFSET_HIT_ACK) return 0u;
+    if (!CanNode_IsReady() || offset > CAN_NODE_OFFSET_PARAM_ACK) return 0u;
     return (uint16_t)(CAN_NODE_BUSINESS_BASE_ID + ((uint16_t)(can_node_diag.node_id - 1u) * CAN_NODE_BUSINESS_STRIDE) + offset);
 }
